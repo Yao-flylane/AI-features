@@ -12,10 +12,36 @@ def check_youtube_availability(url):
     
     try:
         # Try to access the YouTube video page
-        response = requests.head(url, timeout=5, allow_redirects=True)
+        response = requests.get(url, timeout=5, allow_redirects=True)
         
         # Check if the response is successful
         if response.status_code == 200:
+            # Check if the page contains "Video unavailable" or similar error messages
+            content = response.text.lower()
+            
+            # Common error messages that indicate video is not available
+            error_indicators = [
+                'video unavailable',
+                'this video is unavailable',
+                'video is private',
+                'this video is private',
+                'video has been removed',
+                'this video has been removed',
+                'video is not available',
+                'this video is not available',
+                'embedding disabled',
+                'embedding not allowed',
+                'playback restricted',
+                'age restricted',
+                'region restricted'
+            ]
+            
+            # Check if any error indicators are present
+            for indicator in error_indicators:
+                if indicator in content:
+                    return False
+            
+            # If no error indicators found, video should be available
             return True
         else:
             return False
@@ -26,7 +52,17 @@ def check_youtube_availability(url):
 
 def convert_direct_links_to_embedded(text):
     """Convert direct YouTube and PDF links in text to embedded content"""
-
+    import re
+    
+    # First, handle duplicate URLs in format [url](url) - keep only the first one
+    duplicate_pattern = r'\[(https://[^\]]+)\]\(\1\)'
+    def remove_duplicate_urls(match):
+        url = match.group(1)
+        return url  # Return just the URL, removing the redundant [url](url) format
+    
+    # Remove duplicate URLs first
+    text = re.sub(duplicate_pattern, remove_duplicate_urls, text)
+    
     # Find YouTube links
     youtube_pattern = r'https://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)'
     
@@ -34,48 +70,32 @@ def convert_direct_links_to_embedded(text):
         url = match.group(0)
         video_id = match.group(1)
         if len(video_id) == 11:  # Valid YouTube video ID
-            return f'\n\n<iframe width="400" height="225" src="https://www.youtube.com/embed/{video_id}" title="YouTube video" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>\n'
+            # Check if YouTube video is available before embedding
+            if check_youtube_availability(url):
+                return f'\n\n<iframe width="400" height="225" src="https://www.youtube.com/embed/{video_id}" title="YouTube video" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>\n\n'
+            else:
+                # Video not available, remove it completely
+                return ''
         else:
-            # If YouTube embedding fails, show with emoji but no clickable link
-            return f'\n\n🎥 {url}\n'
+            # Invalid video ID, remove it
+            return ''
     
     # Find PDF links
     pdf_pattern = r'https://[^\s]+\.pdf'
     
     def replace_pdf(match):
         url = match.group(0)
-        return f'\n\n📄 {url}\n'
+        return f'{url}'
     
     # Apply replacements
     text = re.sub(youtube_pattern, replace_youtube, text)
     text = re.sub(pdf_pattern, replace_pdf, text)
     
+    # Clean up any extra whitespace or empty lines that might result from removed URLs
+    text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)  # Remove excessive empty lines
+    text = text.strip()  # Remove leading/trailing whitespace
+    
     return text
-
-def replace_citations_with_content(text, search_results):
-    """Make citations [1], [2], etc. clickable links to URLs"""
-    if not search_results:
-        return text
-    
-    import re
-    citation_pattern = r'\[(\d+)\]'
-    
-    def replace_citation_with_link(match):
-        citation_num = int(match.group(1))
-        if citation_num <= len(search_results):
-            result = search_results[citation_num - 1]  # Convert to 0-based index
-            url = result.get('url', '')
-            title = result.get('title', 'Resource')
-            
-            # Make citation clickable - keep the [1], [2] format but make it a link
-            return f'[{citation_num}]({url} "{title}")'
-        else:
-            return match.group(0)  # Keep original if citation number is out of range
-    
-    # Replace all citations with clickable links
-    text_with_links = re.sub(citation_pattern, replace_citation_with_link, text)
-    
-    return text_with_links
 
 # Sidebar configuration
 st.sidebar.header("🔧 Configuration")
@@ -176,7 +196,7 @@ if prompt := st.chat_input(placeholder="Tell me what would you like to learn tod
         if message["role"] in ["assistant"]:
             messages.append({"role": message["role"], "content": message["content"]})
         elif message["role"] in ["user"]:
-            messages.append({"role": message["role"], "content": message["content"]+". I want youtube videos and pdfs resources, make sure all urls are working and available"})
+            messages.append({"role": message["role"], "content": message["content"]+". I want youtube videos and pdfs resources, Only provide working YouTube video links (https://www.youtube.com/watch?v=...) with Valid YouTube video ID. Only provide direct .pdf links that are publicly accessible."})
     
     with st.chat_message("assistant"):
         # Create a placeholder for streaming content
@@ -200,8 +220,6 @@ if prompt := st.chat_input(placeholder="Tell me what would you like to learn tod
             # Add search recency filter if selected
             if search_recency:
                 payload["search_recency_filter"] = search_recency
-            
-            st.sidebar.write("🔄 Streaming response and collecting metadata...")
             
             # Stream the response
             response = requests.post(url, headers=headers, json=payload, stream=True, timeout=300)
@@ -237,21 +255,15 @@ if prompt := st.chat_input(placeholder="Tell me what would you like to learn tod
                                     
                         except json.JSONDecodeError:
                             continue
-            st.sidebar.write(f"📤 {content}")
+            
             # Remove cursor and add search results if available
             enhanced_response = content
             
             if 'search_results' in metadata and metadata['search_results']:
                 search_results = metadata['search_results']
-                st.sidebar.write(f"✅ Found {len(search_results)} search results")
-                
-                # Replace citations with basic content from search results
-                # enhanced_response = replace_citations_with_content(enhanced_response, search_results)
-                
                 # Convert direct links to embedded content
                 enhanced_response = convert_direct_links_to_embedded(enhanced_response)
             else:
-                st.sidebar.write("❌ No search results found")
                 enhanced_response += "\n\n**🔍 No search results found**\n"
                 enhanced_response += "This might be due to the query type or API configuration."
                 
